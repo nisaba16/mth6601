@@ -1,5 +1,5 @@
 {
-  "task_type": "single_test",
+  "task_type": "create_plot",
   "single_test": {
     "instances": "2-Med_1",
     "objectives": "total_customers",
@@ -12,11 +12,22 @@
     "consensus_params": "qualitative",
     "destroy_method": "fix_arrivals"
   },
+  "create_plot": [
+    {
+      "scenario": "TP1",
+      "plots":[
+        {
+          "plot_name": "offline_plot",
+          "metrics": ["% of Service","Average profit ($)","Avg. wait time (min)"]
+        }
+      ]
+    }
+  ],
   "scenarios": [
     {
       "scenario": "initial_test",
       "parameters": {
-        "instances": ["3-High_1", "3-High_2", "3-High_3"],
+        "instances": ["1-Low_1", "1-Low_2", "1-Low_3"],
         "objectives": ["total_customers"],
         "algorithms": ["mip_solver"],
         "solution_mode": ["offline"],
@@ -26,7 +37,7 @@
     {
       "scenario": "TP1",
       "parameters": {
-        "instances": ["3-High_1", "3-High_2", "3-High_3"],
+        "instances": ["1-Low_1", "1-Low_2", "1-Low_3"],
         "objectives": ["total_profit", "waiting_time", "total_customers"],
         "algorithms": ["mip_solver"],
         "solution_mode": ["offline"],
@@ -36,7 +47,7 @@
     {
       "scenario": "TP1_Multi",
       "parameters": {
-        "instances": ["3-High_2"],
+        "instances": ["1-Low_1"],
         "objectives": ["multi_objective"],
         "algorithms": ["mip_solver"],
         "solution_mode": ["offline"],

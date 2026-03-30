@@ -49,6 +49,7 @@ class OfflineSolver:
             Used only for MULTI_OBJECTIVE objective (ignored otherwise). Default 0.5.
         """
         self.objective = objective
+        self.weight = weight
 
         self.objective_value = 0
         self.durations = get_durations(network)
@@ -122,9 +123,33 @@ class OfflineSolver:
         - Access vehicle departure stop via vehicle_request_assign[vehicle_id].departure_stop
         
         """
-
-        """you should write your objective here ..."""
-        raise NotImplementedError("OfflineSolver.define_total_profit_objective() not implemented")
+        
+        # Total revenue from served customers
+        total_revenue = sum(f_i.fare * self.Z_var[f_i.id] for f_i in P)
+        
+        # Total cost from vehicle operations
+        total_cost = 0
+        
+        # Cost for vehicles serving their first customer
+        for f_k in K:
+            for f_i in P:
+                state = vehicle_request_assign[f_k.id]
+                cost_to_customer = self.costs[state.departure_stop][f_i.origin.label]
+                total_cost += cost_to_customer * self.Y_var[f_k.id, f_i.id]
+        
+        # Cost for customer-to-customer connections
+        for f_i in P:
+            for f_j in P:
+                if f_i != f_j:
+                    # Cost from customer i's destination to customer j's origin
+                    cost_between_customers = self.costs[f_i.destination.label][f_j.origin.label]
+                    total_cost += cost_between_customers * self.X_var[f_i.id, f_j.id]
+        
+        # Maximize profit = revenue - cost
+        self.model.setObjective(
+            total_revenue - total_cost,
+            sense=GRB.MAXIMIZE
+        )
 
 
     def define_total_wait_time_objective(self, P):
@@ -141,9 +166,29 @@ class OfflineSolver:
         - Durations are given in seconds. Convert waiting time to minutes by dividing by 60.
 
         """
-
-        """you should write your objective here ..."""
-        raise NotImplementedError("OfflineSolver.define_total_wait_time_objective() not implemented")
+        
+        # Total wait time for all customers (served and unserved)
+        # Wait time = departure time - ready time for served customers
+        # For unserved customers, we assume maximum wait time (latest_pickup - ready_time)
+        total_wait_time = 0
+        
+        for f_i in P:
+            # Wait time for served customers: departure time - ready time (converted to minutes)
+            served_wait_time = (self.U_var[f_i.id] - f_i.ready_time) / 60.0
+            
+            # Wait time for unserved customers: maximum possible wait time
+            # This encourages the model to serve customers to avoid this penalty
+            max_wait_time = (f_i.latest_pickup - f_i.ready_time) / 60.0
+            
+            # Total wait time = served_wait_time * Z_var + max_wait_time * (1 - Z_var)
+            # This simplifies to: max_wait_time + (served_wait_time - max_wait_time) * Z_var
+            total_wait_time += max_wait_time + (served_wait_time - max_wait_time) * self.Z_var[f_i.id]
+        
+        # Minimize total wait time
+        self.model.setObjective(
+            total_wait_time,
+            sense=GRB.MINIMIZE
+        )
 
     def define_multi_objective(self, K, P, vehicle_request_assign):
         """
@@ -166,9 +211,50 @@ class OfflineSolver:
         - Durations are given in seconds. Convert waiting time to minutes by dividing by 60.
 
         """
-
-        """you should write your objective here ..."""
-        raise NotImplementedError("OfflineSolver.define_multi_objective() not implemented")
+        # Get weight parameter (should be passed through the constructor)
+        weight = getattr(self, 'weight', 0.5)  # Default to 0.5 if not set
+        
+        # Calculate total profit (same as in define_total_profit_objective)
+        total_revenue = sum(f_i.fare * self.Z_var[f_i.id] for f_i in P)
+        
+        total_cost = 0
+        # Cost for vehicles serving their first customer
+        for f_k in K:
+            for f_i in P:
+                state = vehicle_request_assign[f_k.id]
+                cost_to_customer = self.costs[state.departure_stop][f_i.origin.label]
+                total_cost += cost_to_customer * self.Y_var[f_k.id, f_i.id]
+        
+        # Cost for customer-to-customer connections
+        for f_i in P:
+            for f_j in P:
+                if f_i != f_j:
+                    cost_between_customers = self.costs[f_i.destination.label][f_j.origin.label]
+                    total_cost += cost_between_customers * self.X_var[f_i.id, f_j.id]
+        
+        total_profit = total_revenue - total_cost
+        
+        # Calculate total wait time (same as in define_total_wait_time_objective)
+        total_wait_time = 0
+        for f_i in P:
+            # Wait time for served customers: departure time - ready time (converted to minutes)
+            served_wait_time = (self.U_var[f_i.id] - f_i.ready_time) / 60.0
+            
+            # Wait time for unserved customers: maximum possible wait time
+            max_wait_time = (f_i.latest_pickup - f_i.ready_time) / 60.0
+            
+            # Total wait time = served_wait_time * Z_var + max_wait_time * (1 - Z_var)
+            total_wait_time += max_wait_time + (served_wait_time - max_wait_time) * self.Z_var[f_i.id]
+        
+        # Combined objective: w * Profit - (1 - w) * Wait_time
+        # Note: Since we want to maximize profit and minimize wait time,
+        # we maximize: w * profit - (1 - w) * wait_time
+        combined_objective = weight * total_profit - (1 - weight) * total_wait_time
+        
+        self.model.setObjective(
+            combined_objective,
+            sense=GRB.MAXIMIZE
+        )
 
 
     def create_model(self, K, P, vehicle_request_assign):
