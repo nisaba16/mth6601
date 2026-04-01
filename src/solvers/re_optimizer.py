@@ -138,6 +138,32 @@ class ReOptimizer(Solver):
         """
         """you should write your code here ..."""
 
+
+        prev_u = self.initial_solution["U"]
+
+        delta = 120.0
+
+        for req in P:
+            req_id = req.id
+            center = prev_u.get(req_id)
+            if center is None:
+                continue
+            if req_id not in offline_model.U_var:
+                continue
+
+            lb = max(req.ready_time, center - delta)
+            ub = min(req.latest_pickup, center + delta)
+
+            # Just to make sure that the window isn't empty
+            if lb > ub:
+                continue
+
+            offline_model.U_var[req_id].LB = lb
+            offline_model.U_var[req_id].UB = ub
+
+        offline_model.model.update()
+
+
     def destroy_fix_variables(self, K, P, offline_model: OfflineSolver):
         """ Fix some of Y_var, X_var variables based on the initial solution.
 
@@ -153,6 +179,41 @@ class ReOptimizer(Solver):
                   vehicle
         """
         """you should write your code here ..."""
+
+        assignment_dict = self.initial_solution["assignment_dict"]
+
+        # request_to_vehicle[request_id] = vehicle_id from previous solution
+        request_to_vehicle: Dict[Any, Any] = {}
+        for vehicle_id, data in assignment_dict.items():
+            for req in data.get("assigned_requests", []):
+                request_to_vehicle[req.id] = vehicle_id
+        
+        for i in P:
+            veh_i = request_to_vehicle.get(i.id)
+            if veh_i is None: #if the request was not assigned initially, we don't care
+                continue
+            for j in P:
+                if i.id == j.id:#same request
+                    continue
+                veh_j = request_to_vehicle.get(j.id)
+                if veh_j is None: #if the request was not assigned initially, we don't care
+                    continue
+                if veh_j!=veh_i and (i.id, j.id) in offline_model.X_var:
+                    offline_model.X_var[i.id, j.id].UB = 0.0
+                    offline_model.X_var[i.id, j.id].LB = 0.0
+        for k in K:
+            for i in P:
+                prev_vehicle = request_to_vehicle.get(i.id)
+                if prev_vehicle is None:
+                    continue
+                if k.id != prev_vehicle and (k.id, i.id) in offline_model.Y_var:
+                    offline_model.Y_var[k.id, i.id].UB = 0.0
+                    offline_model.Y_var[k.id, i.id].LB = 0.0
+
+        offline_model.model.update()
+
+
+        
 
 
     def destroy_bonus(self, K, P, offline_model: OfflineSolver):
