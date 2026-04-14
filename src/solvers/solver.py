@@ -389,10 +389,47 @@ class Solver:
 
         elif self.objective == Objectives.TOTAL_PROFIT:
             """you should write your code here ..."""
+            # Profit = total fares collected − total driving costs.
+            # Revenue: sum fares for every served trip.
+            total_revenue = sum(f_i.fare for f_i in P if self.Z[f_i.id])
+
+            # Cost 1: dead-head from each vehicle's departure stop to the
+            #         origin of its first customer (governed by Y variable).
+            # Cost 2: empty-leg between consecutive customers (X variable).
+            total_cost = 0.0
+            for f_k in K:
+                state = self.vehicle_request_assign[f_k.id]
+                for f_i in P:
+                    if self.Y[f_k.id][f_i.id]:
+                        total_cost += self.costs[state.departure_stop][f_i.origin.label]
+            for f_i in P:
+                for f_j in P:
+                    if f_i != f_j and self.X[f_i.id][f_j.id]:
+                        total_cost += self.costs[f_i.destination.label][f_j.origin.label]
+
+            value = total_revenue - total_cost
+
         elif self.objective == Objectives.WAIT_TIME:
             """you should write your code here ..."""
+            # Minimise total waiting time = sum of (pickup time − earliest
+            # ready time) for every served customer.  Negate so that the
+            # convention "higher value = better" is preserved.
+            total_wait = sum(
+                (self.U[f_i.id] - f_i.ready_time)
+                for f_i in P if self.Z[f_i.id]
+            )
+            value = -total_wait
+
         elif self.objective == Objectives.MULTI_OBJECTIVE:
             """you should write your code here ..."""
+            # Weighted combination: maximise customers served while
+            # minimising total waiting time (equal weights by default).
+            n_served = sum(1 for f_i in P if self.Z[f_i.id])
+            total_wait = sum(
+                (self.U[f_i.id] - f_i.ready_time)
+                for f_i in P if self.Z[f_i.id]
+            )
+            value = n_served - total_wait
 
         self.objective_value = value
 

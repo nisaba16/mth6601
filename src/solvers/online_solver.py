@@ -69,7 +69,11 @@ class OnlineSolver(Solver):
             - Iterate over self.vehicle_request_assign and set assign_possible for each vehicle.
             - Use the parent class method calc_reach_time(veh_info, trip).
         """
-        """you should write your code here ..."""
+        for veh_id, veh_info in self.vehicle_request_assign.items():
+            # A vehicle can serve the trip only if it can reach the pickup
+            # location no later than the customer's latest acceptable pickup time.
+            reach_time = self.calc_reach_time(veh_info, trip)
+            veh_info.assign_possible = (reach_time <= trip.latest_pickup)
 
 
     def online_solver(self, K, P_not_assigned, rejected_trips):
@@ -132,9 +136,31 @@ class OnlineSolver(Solver):
         """
         # for each request find the best insertion position
         assigned_requests = []
-        """
-            Implement your greedy algorithm here:
-        """
+
+        for trip in P_not_assigned:
+            # Mark which vehicles can feasibly pick up this trip in time.
+            self.determine_available_vehicles(trip)
+
+            # Among feasible vehicles, pick the one with the earliest reach
+            # time (arrives at pickup soonest).  This minimises both customer
+            # wait and empty driving, and keeps vehicles well-positioned for
+            # future requests.
+            best_veh_info = None
+            best_reach_time = float("inf")
+
+            for veh_id, veh_info in self.vehicle_request_assign.items():
+                if veh_info.assign_possible:
+                    reach_time = self.calc_reach_time(veh_info, trip)
+                    if reach_time < best_reach_time:
+                        best_reach_time = reach_time
+                        best_veh_info = veh_info
+
+            if best_veh_info is None:
+                # No feasible vehicle found — reject this trip.
+                rejected_trips.append(trip)
+            else:
+                self.assign_trip_to_vehicle(best_veh_info, trip)
+                assigned_requests.append(trip)
 
         return assigned_requests
 
@@ -160,9 +186,25 @@ class OnlineSolver(Solver):
         """
         # for each request find the best insertion position
         assigned_requests = []
-        """
-            Implement your random algorithm here:
-        """
+
+        for trip in P_not_assigned:
+            # Mark which vehicles can feasibly pick up this trip in time.
+            self.determine_available_vehicles(trip)
+
+            # Collect all feasible vehicles then pick one uniformly at random.
+            feasible_vehicles = [
+                veh_info
+                for veh_info in self.vehicle_request_assign.values()
+                if veh_info.assign_possible
+            ]
+
+            if not feasible_vehicles:
+                # No feasible vehicle found — reject this trip.
+                rejected_trips.append(trip)
+            else:
+                chosen_veh_info = random.choice(feasible_vehicles)
+                self.assign_trip_to_vehicle(chosen_veh_info, trip)
+                assigned_requests.append(trip)
 
         return assigned_requests
 
@@ -189,8 +231,30 @@ class OnlineSolver(Solver):
         """
         # for each request find the best insertion position
         assigned_requests = []
-        """
-            Implement your ranking algorithm here:
-        """
+
+        for trip in P_not_assigned:
+            # Mark which vehicles can feasibly pick up this trip in time.
+            self.determine_available_vehicles(trip)
+
+            # Among feasible vehicles, pick the one with the highest
+            # random_number (assigned once at initialisation).  This creates a
+            # fixed global priority ranking that is consistent across requests,
+            # unlike the purely random selection in random_assign.
+            best_veh_info = None
+            best_rank = -1.0
+
+            for veh_id, veh_info in self.vehicle_request_assign.items():
+                if veh_info.assign_possible:
+                    rank = veh_info.random_number if veh_info.random_number is not None else 0.0
+                    if rank > best_rank:
+                        best_rank = rank
+                        best_veh_info = veh_info
+
+            if best_veh_info is None:
+                # No feasible vehicle found — reject this trip.
+                rejected_trips.append(trip)
+            else:
+                self.assign_trip_to_vehicle(best_veh_info, trip)
+                assigned_requests.append(trip)
 
         return assigned_requests
