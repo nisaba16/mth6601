@@ -1,3 +1,5 @@
+from copy import deepcopy
+from collections import defaultdict
 from src.solvers.offline_solver import OfflineSolver
 from src.solvers.solver import Solver
 from src.utilities.enums import ConsensusParams
@@ -109,9 +111,60 @@ class StochasticSolver(Solver):
             - Assign one request at a time and update vehicle state before the next.
         """
         assigned_requests = []
-        """you should write your code here ..."""
+        scenario_start_id = 10_000_000
 
-        return assigned_requests
+        # Boucle extérieure sur les requêtes réelles non assignées.
+        for request in P_not_assigned:
+            vehicle_votes = defaultdict(int)
+
+            # Boucle intérieure sur les scénarios.
+            for scenario_idx in range(self.nb_scenario):
+                scenario = create_random_requests(
+                    network=self.network,
+                    cust_node_hour=self.scenario_param["cust_node_hour"],
+                    start_ID=scenario_start_id,
+                    start_time=current_time,
+                    durations=self.durations,
+                    time_window=self.scenario_param["time_window"],
+                    known_portion=self.scenario_param["known_portion"],
+                    advance_notice=self.scenario_param["advance_notice"],
+                )
+                scenario_start_id += len(scenario) + 1
+
+                # Le modèle est résolu sur la requête courante + le scénario stochastique.
+                P_combined = [request] + scenario
+                scenario_vehicle_assign = deepcopy(self.vehicle_request_assign)
+
+                offline_model = OfflineSolver(self.network, self.objective)
+                offline_model.create_model(K, P_combined, scenario_vehicle_assign)
+                offline_model.define_objective(K, P_combined, scenario_vehicle_assign)
+                offline_model.solve()
+
+                rejected_trips = []
+                offline_model.extract_solution(K, P_combined, rejected_trips, scenario_vehicle_assign)
+
+                # Extraire le véhicule qui a reçu la 1re requête de la solution du scénario.
+                for vehicle_id, state in scenario_vehicle_assign.items():
+                    if not state.assigned_requests:
+                        continue
+                    if state.assigned_requests[0].id == request.id:
+                        vehicle_votes[vehicle_id] += 1
+                        break
+
+            if not vehicle_votes:
+                continue
+
+            selected_vehicle_id = max(vehicle_votes, key=vehicle_votes.get)
+            selected_state = self.vehicle_request_assign[selected_vehicle_id]
+
+            # Incrémente un compteur de requêtes pour le véhicule sélectionné.
+            current_counter = getattr(selected_state, "request_counter", 0)
+            setattr(selected_state, "request_counter", current_counter + 1)
+
+            self.assign_trip_to_vehicle(selected_state, request)
+            assigned_requests.append(request)
+        return (assigned_requests)
+
 
 
     def quantitative_consensus(self, K, P_not_assigned, current_time):
@@ -134,6 +187,57 @@ class StochasticSolver(Solver):
             - Assign one request at a time and update vehicle state before the next.
         """
         assigned_requests = []
-        """you should write your code here ..."""
-        return assigned_requests
+        scenario_start_id = 10_000_000
+
+        # Boucle extérieure sur les requêtes réelles non assignées.
+        for request in P_not_assigned:
+            vehicle_votes = defaultdict(int)
+
+            # Boucle intérieure sur les scénarios.
+            for scenario_idx in range(self.nb_scenario):
+                scenario = create_random_requests(
+                    network=self.network,
+                    cust_node_hour=self.scenario_param["cust_node_hour"],
+                    start_ID=scenario_start_id,
+                    start_time=current_time,
+                    durations=self.durations,
+                    time_window=self.scenario_param["time_window"],
+                    known_portion=self.scenario_param["known_portion"],
+                    advance_notice=self.scenario_param["advance_notice"],
+                )
+                scenario_start_id += len(scenario) + 1
+
+                # Le modèle est résolu sur la requête courante + le scénario stochastique.
+                P_combined = [request] + scenario
+                scenario_vehicle_assign = deepcopy(self.vehicle_request_assign)
+
+                offline_model = OfflineSolver(self.network, self.objective)
+                offline_model.create_model(K, P_combined, scenario_vehicle_assign)
+                offline_model.define_objective(K, P_combined, scenario_vehicle_assign)
+                offline_model.solve()
+
+                rejected_trips = []
+                offline_model.extract_solution(K, P_combined, rejected_trips, scenario_vehicle_assign)
+
+                # Extraire le véhicule qui a reçu la 1re requête de la solution du scénario.
+                for vehicle_id, state in scenario_vehicle_assign.items():
+                    if not state.assigned_requests:
+                        continue
+                    if state.assigned_requests[0].id == request.id:
+                        vehicle_votes[vehicle_id] += offline_model.objective_value
+                        break
+
+            if not vehicle_votes:
+                continue
+
+            selected_vehicle_id = max(vehicle_votes, key=vehicle_votes.get)
+            selected_state = self.vehicle_request_assign[selected_vehicle_id]
+
+            # Incrémente un compteur de requêtes pour le véhicule sélectionné.
+            current_counter = getattr(selected_state, "request_counter", 0)
+            setattr(selected_state, "request_counter", current_counter + 1)
+
+            self.assign_trip_to_vehicle(selected_state, request)
+            assigned_requests.append(request)
+        return (assigned_requests)
 
