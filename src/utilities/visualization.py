@@ -1,4 +1,13 @@
 import os
+import logging
+
+import matplotlib
+
+# In many grading/CI environments there is no display server. Use a non-interactive
+# backend so plot generation works everywhere.
+if os.environ.get("DISPLAY", "") == "":
+    matplotlib.use("Agg")
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -7,9 +16,71 @@ import seaborn as sns
 from src.utilities.tools import create_solution_description, merge_algorithms_param, add_data_labels
 
 
+def _objective_is_minimization(obj_type: str) -> bool:
+    obj = str(obj_type).lower()
+    return "wait" in obj or "time" in obj
+
+
+def _ensure_competitive_ratio(df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
+    """Ensure df has a 'Competitive Ratio' column.
+
+    If it's missing, compute it relative to the best (per group) Objective value.
+    For maximization objectives: ratio = value / best.
+    For minimization objectives: ratio = best / value.
+    """
+    if "Competitive Ratio" in df.columns:
+        return df
+
+    if "Objective value" not in df.columns or "Objective type" not in df.columns:
+        return df
+
+    df = df.copy()
+    df["Objective value"] = pd.to_numeric(df["Objective value"], errors="coerce")
+
+    # Compute best objective value per group (direction depends on objective type).
+    # Use transform so we don't depend on group columns being present inside an apply() frame.
+    is_min = df["Objective type"].apply(_objective_is_minimization)
+    best_max = df.groupby(group_cols, dropna=False, sort=False)["Objective value"].transform("max")
+    best_min = df.groupby(group_cols, dropna=False, sort=False)["Objective value"].transform("min")
+    df["_best"] = np.where(is_min, best_min, best_max)
+
+    # Compute ratio safely.
+    def ratio(row) -> float:
+        value = row.get("Objective value")
+        best_v = row.get("_best")
+        if pd.isna(value) or pd.isna(best_v) or best_v == 0 or value == 0:
+            return 0.0
+        if _objective_is_minimization(row.get("Objective type")):
+            return round(float(best_v) / float(value), 2)
+        return round(float(value) / float(best_v), 2)
+
+    df["Competitive Ratio"] = df.apply(ratio, axis=1)
+    df.drop(columns=["_best"], inplace=True)
+    return df
+
+
+def _filter_metrics(df: pd.DataFrame, metrics: list[str], *, context: str) -> list[str]:
+    """Return metrics that exist in df; warn about missing metrics."""
+    present = [m for m in metrics if m in df.columns]
+    missing = [m for m in metrics if m not in df.columns]
+    if missing:
+        logging.warning(
+            "%s: skipping missing metric columns: %s. Available columns include: %s",
+            context,
+            missing,
+            list(df.columns)[:12],
+        )
+    return present
+
+
 def offline_plot(data_path, metrics):
     # Read the dataset
     df = pd.read_csv(data_path)
+
+    metrics = _filter_metrics(df, metrics, context="offline_plot")
+    if not metrics:
+        logging.error("offline_plot: no valid metrics to plot.")
+        return
 
     # Group by 'Time window (min)', 'Objective type' and calculate the mean for the required columns
     grouped = df.groupby(['Time window (min)', 'Objective type'])[metrics].mean().reset_index()
@@ -60,18 +131,27 @@ def offline_plot(data_path, metrics):
     figure_path = os.path.join(os.path.dirname(data_path), 'offline_plot.png')
     plt.savefig(figure_path, dpi=300, bbox_inches='tight')
 
-    # Show the plot
-    plt.show(block=False)  # Show plot without blocking the script
-    plt.pause(2)  # Pause for 2 seconds
+    # Close without trying to display (headless-safe)
     plt.close()
 
 def compare_algorithm_plot(data_path, metrics):
     # Read the dataset
     df = pd.read_csv(data_path)
 
-    # Ensure that 'Solution Description' is created correctly
+    # Ensure derived columns exist
     df['Solution Description'] = df.apply(create_solution_description, axis=1)
     df['Algorithms'] = df.apply(merge_algorithms_param, axis=1)
+
+    # Some scenarios don't contain an offline reference, so Competitive Ratio may be missing.
+    # Compute it relative to the best solution per (instance, mode, window, objective).
+    if "Competitive Ratio" in metrics and "Competitive Ratio" not in df.columns:
+        ratio_group_cols = [c for c in ["Test", "Solution Description", "Time window (min)", "Objective type"] if c in df.columns]
+        df = _ensure_competitive_ratio(df, ratio_group_cols)
+
+    metrics = _filter_metrics(df, metrics, context="compare_algorithm_plot")
+    if not metrics:
+        logging.error("compare_algorithm_plot: no valid metrics to plot.")
+        return
 
 
 
@@ -179,7 +259,7 @@ def compare_algorithm_plot(data_path, metrics):
                 ax.legend().remove()
             # Set title for each Objective_type column
             if num_objectives > 1 and i == 0:
-                ax.set_title(f'Obj: {obj_type.replace('_', ' ').capitalize()}', fontsize=10, fontweight='bold')
+                ax.set_title(f"Obj: {obj_type.replace('_', ' ').capitalize()}", fontsize=10, fontweight='bold')
             ax.minorticks_off()
 
 
@@ -198,11 +278,7 @@ def compare_algorithm_plot(data_path, metrics):
 
     # Save the plot to the same directory as the data file
     figure_path = os.path.join(os.path.dirname(data_path), plot_filename)
-    # Display the plot
-
     plt.savefig(figure_path, dpi=300, bbox_inches='tight')
-    plt.show(block=False)  # Show plot without blocking the script
-    plt.pause(2)  # Pause for 2 seconds
     plt.close()
 
 def compare_timeWindow_plot(data_path, metrics):
@@ -212,6 +288,15 @@ def compare_timeWindow_plot(data_path, metrics):
     # Ensure that 'Solution Description' and 'Algorithms' are created correctly
     df['Solution Description'] = df.apply(create_solution_description, axis=1)
     df['Algorithms'] = df.apply(merge_algorithms_param, axis=1)
+
+    if "Competitive Ratio" in metrics and "Competitive Ratio" not in df.columns:
+        ratio_group_cols = [c for c in ["Test", "Solution Description", "Time window (min)", "Objective type"] if c in df.columns]
+        df = _ensure_competitive_ratio(df, ratio_group_cols)
+
+    metrics = _filter_metrics(df, metrics, context="compare_timeWindow_plot")
+    if not metrics:
+        logging.error("compare_timeWindow_plot: no valid metrics to plot.")
+        return
 
     # Group by 'Solution Description', 'Algorithms', 'Objective type', and 'Time window (min)' and calculate the mean for the required columns
     grouped = df.groupby(['Solution Description', 'Algorithms', 'Objective type', 'Time window (min)'])[

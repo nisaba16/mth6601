@@ -3,10 +3,6 @@ import os
 import logging
 import json
 
-from src.run_test.create_plots import handle_create_plot
-from src.run_test.run_tests import run_single_test, run_scenarios
-from src.run_test.create_instance import create_instances
-
 logging.getLogger().setLevel(logging.WARN)
 
 def main():
@@ -31,13 +27,20 @@ def main():
     task_type = config_data.get("task_type")
 
     if task_type == "scenarios":
+        # Lazy import: running scenarios requires the simulation/solver stack.
+        from src.run_test.run_tests import run_scenarios
         SCENARIOS = {scenario["scenario"]: scenario["parameters"] for scenario in config_data.get("scenarios", [])}
         run_scenarios(args.scenario, SCENARIOS)
     elif task_type == "single_test":
+        # Lazy import: running a test requires the simulation/solver stack.
+        from src.run_test.run_tests import run_single_test
         run_single_test(config_data["single_test"])
     elif task_type == "create_plot":
+        # Lazy import: plotting should not require optional solvers (e.g., Gurobi).
+        from src.run_test.create_plots import handle_create_plot
         handle_create_plot(config_data["create_plot"], args.scenario)
     elif task_type == "create_instance":
+        from src.run_test.create_instance import create_instances
         create_instances(config_data["create_instance"])
     else:
         logging.error(f"Invalid task type '{task_type}'. Must be 'single_test' or 'scenarios'.")

@@ -1,7 +1,5 @@
-from copy import deepcopy
-from collections import defaultdict
 from src.solvers.offline_solver import OfflineSolver
-from src.solvers.solver import Solver
+from src.solvers.solver import Solver, VehicleState
 from src.utilities.enums import ConsensusParams
 from src.utilities.create_scenario import create_random_requests
 from typing import Any, Dict, List
@@ -13,7 +11,7 @@ class StochasticSolver(Solver):
     """Online stochastic solution: scenario generation plus offline solve per scenario.
 
     Two types of consensus:
-        - qualitative: aggregate which request is “best” across scenarios (e.g. by voting).
+        - qualitative: aggregate which request is "best" across scenarios (e.g. by voting).
         - quantitative: use scenario objective values to score best request–vehicle assignments.
 
     Attributes:
@@ -91,8 +89,93 @@ class StochasticSolver(Solver):
         else:
             raise ValueError("The solution is not feasible")
 
+    def _build_vehicle_state_copy(self, K):
+        """Create a shallow copy of vehicle states for use in a scenario solve.
+
+        We copy only the positional fields (departure_stop, departure_time,
+        last_stop, last_stop_time) needed by OfflineSolver, and start each
+        vehicle with an empty assignment list so the scenario solve is clean.
+        """
+        veh_assign_copy = {}
+        for veh in K:
+            state = self.vehicle_request_assign[veh.id]
+            new_state = VehicleState(vehicle=veh)
+            new_state.departure_stop = state.departure_stop
+            new_state.departure_time = state.departure_time
+            new_state.last_stop = state.last_stop
+            new_state.last_stop_time = state.last_stop_time
+            new_state.assigned_requests = []
+            veh_assign_copy[veh.id] = new_state
+        return veh_assign_copy
+
+    def _solve_scenario(self, K, P_combined, veh_assign_copy):
+        """Solve a single scenario with OfflineSolver.
+
+        Returns the solved OfflineSolver instance, or None if the solve failed.
+        Each scenario uses a fresh Gurobi model so scenarios are independent.
+        """
+        offline_model = OfflineSolver(self.network, self.objective)
+        rejected = []
+        try:
+            offline_model.offline_solver(K, P_combined, veh_assign_copy, rejected)
+        except Exception:
+            return None
+        return offline_model
+
+    def _greedy_assign_by_score(self, K, P_not_assigned, scores):
+        """Assign requests to vehicles one at a time in descending score order.
+
+        At each iteration we pick the (vehicle, request) pair with the highest
+        score that is still feasible (vehicle can reach the request in time).
+        We then update the vehicle state so subsequent assignments respect the
+        new last-stop position.  A score of 0 or less means no scenario ever
+        recommended this pair, so we stop.
+        """
+        assigned_requests = []
+        assigned_ids = set()
+        remaining = list(P_not_assigned)
+
+        while remaining:
+            best_score = 0
+            best_veh = None
+            best_req = None
+
+            for veh in K:
+                veh_info = self.vehicle_request_assign[veh.id]
+                for req in remaining:
+                    if req.id in assigned_ids:
+                        continue
+                    reach_time = self.calc_reach_time(veh_info, req)
+                    if reach_time <= req.latest_pickup:
+                        score = scores[veh.id].get(req.id, 0)
+                        if score > best_score:
+                            best_score = score
+                            best_veh = veh
+                            best_req = req
+
+            # No feasible (vehicle, request) pair with positive score — stop.
+            if best_req is None or best_score <= 0:
+                break
+
+            veh_info = self.vehicle_request_assign[best_veh.id]
+            self.assign_trip_to_vehicle(veh_info, best_req)
+            assigned_requests.append(best_req)
+            assigned_ids.add(best_req.id)
+            remaining = [r for r in remaining if r.id not in assigned_ids]
+
+        return assigned_requests
+
     def qualitative_consensus(self, K, P_not_assigned, current_time):
         """Assign requests using qualitative consensus over scenario solutions.
+
+        For each scenario we solve the combined (real + random future) request
+        pool optimally.  For each vehicle we then check which *real* request
+        was scheduled as its first trip in that optimal solution.  A counter
+        for that (vehicle, request) pair is incremented by 1 (vote).
+
+        After all scenarios the pair with the most votes is assigned first,
+        vehicle state is updated, and the process repeats until no positively-
+        scored feasible assignment remains.
 
         Input:
         ------------
@@ -103,73 +186,65 @@ class StochasticSolver(Solver):
         Output:
         ------------
             assigned_requests : list of assigned requests.
-
-        Hint:
-            - Generate multiple scenarios (use create_random_requests from create_scenario.py) and solve each with OfflineSolver.
-            - Use the scenario solutions to decide which request to assign to which vehicle (e.g. aggregate
-              information across scenarios).
-            - Assign one request at a time and update vehicle state before the next.
         """
-        assigned_requests = []
-        scenario_start_id = 10_000_000
+        if not K or not P_not_assigned:
+            return []
 
-        # Boucle extérieure sur les requêtes réelles non assignées.
-        for request in P_not_assigned:
-            vehicle_votes = defaultdict(int)
+        # scores[veh.id][req.id] = number of scenarios that assigned req first to veh
+        scores = {veh.id: {req.id: 0 for req in P_not_assigned} for veh in K}
 
-            # Boucle intérieure sur les scénarios.
-            for scenario_idx in range(self.nb_scenario):
-                scenario = create_random_requests(
+        # Use a large offset for scenario request IDs to avoid clashing with
+        # real request IDs (which are small integers encoded as strings).
+        base_start_id = 1_000_000
+
+        for s in range(self.nb_scenario):
+            start_id = base_start_id + s * 10_000
+
+            # Generate random future requests (required parameters only, per TP note 2).
+            try:
+                scenario_requests = create_random_requests(
                     network=self.network,
-                    cust_node_hour=self.scenario_param["cust_node_hour"],
-                    start_ID=scenario_start_id,
+                    cust_node_hour=self.scenario_param['cust_node_hour'],
+                    start_ID=start_id,
                     start_time=current_time,
                     durations=self.durations,
-                    time_window=self.scenario_param["time_window"],
-                    known_portion=self.scenario_param["known_portion"],
-                    advance_notice=self.scenario_param["advance_notice"],
+                    time_window=self.scenario_param['time_window'],
                 )
-                scenario_start_id += len(scenario) + 1
-
-                # Le modèle est résolu sur la requête courante + le scénario stochastique.
-                P_combined = [request] + scenario
-                scenario_vehicle_assign = deepcopy(self.vehicle_request_assign)
-
-                offline_model = OfflineSolver(self.network, self.objective)
-                offline_model.create_model(K, P_combined, scenario_vehicle_assign)
-                offline_model.define_objective(K, P_combined, scenario_vehicle_assign)
-                offline_model.solve()
-
-                rejected_trips = []
-                offline_model.extract_solution(K, P_combined, rejected_trips, scenario_vehicle_assign)
-
-                # Extraire le véhicule qui a reçu la 1re requête de la solution du scénario.
-                for vehicle_id, state in scenario_vehicle_assign.items():
-                    if not state.assigned_requests:
-                        continue
-                    if state.assigned_requests[0].id == request.id:
-                        vehicle_votes[vehicle_id] += 1
-                        break
-
-            if not vehicle_votes:
+            except Exception:
                 continue
 
-            selected_vehicle_id = max(vehicle_votes, key=vehicle_votes.get)
-            selected_state = self.vehicle_request_assign[selected_vehicle_id]
+            P_combined = list(P_not_assigned) + scenario_requests
 
-            # Incrémente un compteur de requêtes pour le véhicule sélectionné.
-            current_counter = getattr(selected_state, "request_counter", 0)
-            setattr(selected_state, "request_counter", current_counter + 1)
+            veh_assign_copy = self._build_vehicle_state_copy(K)
 
-            self.assign_trip_to_vehicle(selected_state, request)
-            assigned_requests.append(request)
-        return (assigned_requests)
+            offline_model = self._solve_scenario(K, P_combined, veh_assign_copy)
+            if offline_model is None:
+                continue
 
+            # For each vehicle, find which real request (if any) is its first trip
+            # in the scenario solution (Y_var[veh_id, req_id] == 1) and cast a vote.
+            for veh in K:
+                for req in P_not_assigned:
+                    key = (veh.id, req.id)
+                    if key not in offline_model.Y_var:
+                        continue
+                    try:
+                        if offline_model.Y_var[key].X > 0.5:
+                            scores[veh.id][req.id] += 1
+                    except Exception:
+                        pass
+
+        return self._greedy_assign_by_score(K, P_not_assigned, scores)
 
 
     def quantitative_consensus(self, K, P_not_assigned, current_time):
         """Assign requests using quantitative consensus (score by scenario objective values).
 
+        Like qualitative consensus but instead of incrementing by 1, we credit
+        the (vehicle, request) pair by the optimal objective value of that
+        scenario.  This gives more weight to scenarios where the chosen first
+        assignment leads to a high-value overall solution.
+
         Input:
         ------------
             K : set of vehicles
@@ -179,65 +254,54 @@ class StochasticSolver(Solver):
         Output:
         ------------
             assigned_requests : list of assigned requests.
-
-        Hint:
-            - Generate multiple scenarios (use create_random_requests from create_scenario.py) and solve each with OfflineSolver.
-            - Use each scenario’s objective value to score or rank request–vehicle options; then choose
-              assignments.
-            - Assign one request at a time and update vehicle state before the next.
         """
-        assigned_requests = []
-        scenario_start_id = 10_000_000
+        if not K or not P_not_assigned:
+            return []
 
-        # Boucle extérieure sur les requêtes réelles non assignées.
-        for request in P_not_assigned:
-            vehicle_votes = defaultdict(int)
+        # scores[veh.id][req.id] = cumulative objective value from scenarios
+        # where req was assigned as the first trip of veh.
+        scores = {veh.id: {req.id: 0.0 for req in P_not_assigned} for veh in K}
 
-            # Boucle intérieure sur les scénarios.
-            for scenario_idx in range(self.nb_scenario):
-                scenario = create_random_requests(
+        base_start_id = 1_000_000
+
+        for s in range(self.nb_scenario):
+            start_id = base_start_id + s * 10_000
+
+            try:
+                scenario_requests = create_random_requests(
                     network=self.network,
-                    cust_node_hour=self.scenario_param["cust_node_hour"],
-                    start_ID=scenario_start_id,
+                    cust_node_hour=self.scenario_param['cust_node_hour'],
+                    start_ID=start_id,
                     start_time=current_time,
                     durations=self.durations,
-                    time_window=self.scenario_param["time_window"],
-                    known_portion=self.scenario_param["known_portion"],
-                    advance_notice=self.scenario_param["advance_notice"],
+                    time_window=self.scenario_param['time_window'],
                 )
-                scenario_start_id += len(scenario) + 1
-
-                # Le modèle est résolu sur la requête courante + le scénario stochastique.
-                P_combined = [request] + scenario
-                scenario_vehicle_assign = deepcopy(self.vehicle_request_assign)
-
-                offline_model = OfflineSolver(self.network, self.objective)
-                offline_model.create_model(K, P_combined, scenario_vehicle_assign)
-                offline_model.define_objective(K, P_combined, scenario_vehicle_assign)
-                offline_model.solve()
-
-                rejected_trips = []
-                offline_model.extract_solution(K, P_combined, rejected_trips, scenario_vehicle_assign)
-
-                # Extraire le véhicule qui a reçu la 1re requête de la solution du scénario.
-                for vehicle_id, state in scenario_vehicle_assign.items():
-                    if not state.assigned_requests:
-                        continue
-                    if state.assigned_requests[0].id == request.id:
-                        vehicle_votes[vehicle_id] += offline_model.objective_value
-                        break
-
-            if not vehicle_votes:
+            except Exception:
                 continue
 
-            selected_vehicle_id = max(vehicle_votes, key=vehicle_votes.get)
-            selected_state = self.vehicle_request_assign[selected_vehicle_id]
+            P_combined = list(P_not_assigned) + scenario_requests
 
-            # Incrémente un compteur de requêtes pour le véhicule sélectionné.
-            current_counter = getattr(selected_state, "request_counter", 0)
-            setattr(selected_state, "request_counter", current_counter + 1)
+            veh_assign_copy = self._build_vehicle_state_copy(K)
 
-            self.assign_trip_to_vehicle(selected_state, request)
-            assigned_requests.append(request)
-        return (assigned_requests)
+            offline_model = self._solve_scenario(K, P_combined, veh_assign_copy)
+            if offline_model is None:
+                continue
 
+            obj_value = offline_model.objective_value
+            # Only credit scenarios that yielded a positive objective (profitable).
+            # A zero or negative value would penalise good assignments.
+            if obj_value <= 0:
+                continue
+
+            for veh in K:
+                for req in P_not_assigned:
+                    key = (veh.id, req.id)
+                    if key not in offline_model.Y_var:
+                        continue
+                    try:
+                        if offline_model.Y_var[key].X > 0.5:
+                            scores[veh.id][req.id] += obj_value
+                    except Exception:
+                        pass
+
+        return self._greedy_assign_by_score(K, P_not_assigned, scores)
